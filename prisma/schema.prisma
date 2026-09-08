@@ -1,0 +1,191 @@
+// Verifin — persistent data model.
+//
+// Provider is SQLite for zero-config local development (the "graceful
+// fallback" required when no production Postgres is configured). Switching
+// to production is a one-line datasource change:
+//
+//   datasource db {
+//     provider = "postgresql"
+//     url      = env("DATABASE_URL")
+//   }
+//
+// Enums are intentionally modeled as validated Strings (see src/lib/types.ts)
+// rather than Prisma `enum`, because SQLite has no native enum type — this
+// keeps one schema file valid on both providers instead of forking it.
+//
+// Array/object fields (string[] and the tool-call log) are modeled as
+// `String` holding JSON text rather than Prisma's `Json` type, because
+// SQLite's connector doesn't support `Json` — see src/lib/json.ts for the
+// serialize/deserialize helpers used at every read/write site. On Postgres
+// these could become native `Json` columns; kept as JSON-text here so one
+// schema file works unchanged on both providers.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A KYC/AML case. This is the aggregate root and the authoritative source
+/// of truth for business state — never Hermes memory, never server memory.
+model Application {
+  id             String   @id @default(uuid())
+  customerName   String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  /// Business-facing status. One of: New, Processing, PendingReview,
+  /// Approved, Escalated, Rejected, Error. Preserved verbatim from the
+  /// source application (see src/lib/types.ts BUSINESS_STATUSES).
+  status         String   @default("New")
+
+  /// Internal AI-pipeline stage, independent of the business status above.
+  /// One of the AnalysisStage values in src/lib/types.ts (NEW,
+  /// DOCUMENTS_VALIDATED, KYC_ANALYSIS_RUNNING, ... PENDING_REVIEW,
+  /// ANALYSIS_ERROR). Lets a failed stage be retried without re-running or
+  /// losing already-completed stages.
+  analysisStage  String   @default("NEW")
+  analysisError  String?
+
+  files          UploadedFile[]
+  kycResult      KycResult?
+  amlResult      AmlResult?
+  summary        ComplianceSummary?
+  auditEntries   AuditEntry[]
+  comments       Comment[]
+  agentRuns      AgentRun[]
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Metadata + storage reference only — the actual bytes live in object
+/// storage (FileStorageService), never as a Base64 blob in the database.
+model UploadedFile {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  name        String
+  mimeType    String
+  size        Int
+  /// "kyc_document" | "transaction_log"
+  category    String
+  /// Opaque key resolved by the active FileStorageService implementation.
+  storageKey  String
+  createdAt   DateTime @default(now())
+
+  @@index([applicationId, category])
+}
+
+/// KYC completeness result for the whole document set (not just the first
+/// file — see EvidenceSet in src/lib/evidence).
+model KycResult {
+  applicationId       String   @id
+  application         Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  isComplete          Boolean
+  /// JSON-encoded string[] — see src/lib/json.ts.
+  missingInformation  String
+  reasoning           String
+  /// JSON-encoded string[] of evidence citations, e.g. "Passport.pdf", "March.csv#row-38".
+  evidenceReferences  String
+  /// "gemini" | "fallback-deterministic" — which analyzer produced this.
+  source              String
+  createdAt           DateTime @default(now())
+}
+
+/// AML risk result computed over the *complete* aggregated evidence set
+/// (all KYC docs + all transaction CSVs), not a single representative file.
+model AmlResult {
+  applicationId       String   @id
+  application         Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  riskLevel           String   // "Low" | "Medium" | "High"
+  riskScore           Float    // 0-100
+  /// JSON-encoded string[].
+  flags               String
+  reasoning           String
+  /// JSON-encoded string[] of evidence citations.
+  evidenceReferences  String
+  source              String
+  createdAt           DateTime @default(now())
+}
+
+model ComplianceSummary {
+  applicationId   String   @id
+  application     Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  overallRisk     String   // "Low" | "Medium" | "High"
+  summary         String
+  reasoning       String
+  /// JSON-encoded string[].
+  recommendations String
+  source          String
+  createdAt       DateTime @default(now())
+}
+
+/// Append-only, persistent audit trail. Every important operation writes
+/// one of these — see src/lib/audit.ts recordAuditEvent().
+model AuditEntry {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  timestamp     DateTime @default(now())
+  /// e.g. "System", "Hermes", "AI Analyzer", or a reviewer's name/email.
+  actor         String
+  action        String
+  details       String?
+
+  @@index([applicationId, timestamp])
+}
+
+model Comment {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  author        String
+  body          String
+  createdAt     DateTime @default(now())
+
+  @@index([applicationId, createdAt])
+}
+
+/// One record per Hermes orchestration pass over an application. Tracks the
+/// agent's own execution — not business data — so the pipeline is
+/// retryable and observable without re-deriving state from memory.
+model AgentRun {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+
+  startedAt     DateTime @default(now())
+  completedAt   DateTime?
+  /// "running" | "completed" | "failed"
+  status        String   @default("running")
+  objective     String
+  /// JSON-encoded ordered list of {tool, input, output, at} tool-call
+  /// records, for observability — see Hermes Agent Activity in the UI.
+  toolCalls     String   @default("[]")
+  result        String?
+  error         String?
+
+  @@index([applicationId, startedAt])
+}
+
+/// Curated, human-approved knowledge Hermes may retrieve at inference time
+/// (workflow procedures, reasoning patterns, historical case patterns).
+/// This is explicitly NOT a store of raw customer data — see
+/// src/lib/hermes/memory.ts and CLAUDE.md section 10/37.
+model CuratedKnowledge {
+  id          String   @id @default(uuid())
+  kind        String   // "procedure" | "heuristic" | "case_pattern" | "lesson"
+  title       String
+  content     String
+  createdAt   DateTime @default(now())
+}
