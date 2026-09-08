@@ -17,3 +17,5 @@ storage/
 coverage/
 .vercel
 next-env.d.ts
+__pycache__/
+*.pyc
