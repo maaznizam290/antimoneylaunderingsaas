@@ -123,6 +123,8 @@ export default function DashboardPage() {
                     <th className="px-5 py-2.5">Customer</th>
                     <th className="px-5 py-2.5">Status</th>
                     <th className="px-5 py-2.5">Risk</th>
+                    <th className="px-5 py-2.5">Compliance Agent</th>
+                    <th className="px-5 py-2.5">Comments</th>
                     <th className="px-5 py-2.5">Created</th>
                     <th className="px-5 py-2.5">Updated</th>
                   </tr>
@@ -130,6 +132,7 @@ export default function DashboardPage() {
                 <tbody>
                   {filtered.map((app) => {
                     const risk = app.summary?.overallRisk ?? app.amlResult?.riskLevel;
+                    const latestComment = app.comments.length > 0 ? app.comments[app.comments.length - 1] : null;
                     return (
                       <tr key={app.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50">
                         <td className="px-5 py-3">
@@ -142,6 +145,16 @@ export default function DashboardPage() {
                           <Badge tone={statusTone(app.status)}>{app.status}</Badge>
                         </td>
                         <td className="px-5 py-3">{risk ? <Badge tone={riskTone(risk)}>{risk}</Badge> : <span className="text-slate-400">—</span>}</td>
+                        <td className="px-5 py-3 text-slate-700">{latestComment?.author ?? <span className="text-slate-400">—</span>}</td>
+                        <td className="px-5 py-3 text-slate-500">
+                          {latestComment ? (
+                            <span className="block max-w-xs truncate" title={latestComment.body}>
+                              {latestComment.body}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">—</span>
+                          )}
+                        </td>
                         <td className="px-5 py-3 text-slate-500">{format(new Date(app.createdAt), 'PP p')}</td>
                         <td className="px-5 py-3 text-slate-500">{format(new Date(app.updatedAt), 'PP p')}</td>
                       </tr>
