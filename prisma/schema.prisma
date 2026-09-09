@@ -1,31 +1,31 @@
 // Verifin — persistent data model.
 //
-// Provider is SQLite for zero-config local development (the "graceful
-// fallback" required when no production Postgres is configured). Switching
-// to production is a one-line datasource change:
-//
-//   datasource db {
-//     provider = "postgresql"
-//     url      = env("DATABASE_URL")
-//   }
+// PostgreSQL, required. This was SQLite in an earlier revision for
+// zero-config local dev, but SQLite is a *local file* — it cannot work on
+// Vercel (or any serverless platform), whose function filesystem is
+// read-only outside /tmp, and /tmp itself is wiped between invocations and
+// not shared across the multiple instances a deployment runs concurrently.
+// That combination is exactly what turns "works on localhost" into
+// "500 on every request that touches the database" the moment this app is
+// deployed there — there is no config flag that fixes it while the
+// datasource stays file-based. See README.md "Deploying to Vercel" for
+// setup (a free Neon/Supabase/Vercel Postgres instance works fine).
 //
 // Enums are intentionally modeled as validated Strings (see src/lib/types.ts)
-// rather than Prisma `enum`, because SQLite has no native enum type — this
-// keeps one schema file valid on both providers instead of forking it.
+// rather than Prisma `enum`, to avoid a migration if a lighter-weight
+// database ever needs to be supported again.
 //
 // Array/object fields (string[] and the tool-call log) are modeled as
-// `String` holding JSON text rather than Prisma's `Json` type, because
-// SQLite's connector doesn't support `Json` — see src/lib/json.ts for the
-// serialize/deserialize helpers used at every read/write site. On Postgres
-// these could become native `Json` columns; kept as JSON-text here so one
-// schema file works unchanged on both providers.
+// `String` holding JSON text (see src/lib/json.ts) rather than Prisma's
+// native `Json` type. This predates the Postgres-only move and still works
+// unchanged here; it's not something that needs revisiting for Vercel.
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 

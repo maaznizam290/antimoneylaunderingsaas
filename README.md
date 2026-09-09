@@ -11,7 +11,7 @@ compliance review.
 
 | Source (ComplyAI) | Verifin |
 |---|---|
-| `let applicationsStore: CustomerApplication[] = []` (in-memory, lost on restart) | PostgreSQL/SQLite via Prisma — the sole source of truth |
+| `let applicationsStore: CustomerApplication[] = []` (in-memory, lost on restart) | PostgreSQL via Prisma — the sole source of truth |
 | Documents stored as Base64 `dataUri` inline with app state | Metadata in the DB; bytes in a `FileStorageService` (local disk in dev, swappable for S3/GCS/Supabase Storage) |
 | AML analysis used "the first KYC document and first transaction log ... This is a simplification" | AML runs over a deterministically aggregated evidence set built from **every** uploaded document and **every** transaction CSV |
 | One `handleNewApplication()` ran KYC → AML → summary with no persistence of partial progress | A 10-stage persistent `analysisStage` state machine; a failed stage is retried without re-running completed ones |
@@ -44,7 +44,7 @@ compliance review.
    statistics + pattern flags      Gemini call fails
         │                              │
         ▼                              ▼
- FileStorageService              PostgreSQL / SQLite (Prisma)
+ FileStorageService              PostgreSQL (Prisma)
  (src/lib/storage/**)            — Application, UploadedFile, KycResult,
    document bytes only             AmlResult, ComplianceSummary,
                                     AuditEntry, AgentRun, CuratedKnowledge
@@ -72,23 +72,32 @@ state — New/Processing/PendingReview/Approved/Escalated/Rejected/Error;
 curated (human-seeded) procedure/heuristic store — see **Agent memory
 strategy** below.
 
-The schema targets SQLite for zero-config local dev; switching to
-production Postgres is a one-line datasource change (see the comment at the
-top of `schema.prisma`). Array fields (`missingInformation`, `flags`,
-`evidenceReferences`, `recommendations`, `toolCalls`) are stored as JSON
-text rather than Prisma's native `Json` type because SQLite's connector
-doesn't support it — see `src/lib/json.ts`.
+The schema requires PostgreSQL, in every environment including local dev
+(see **Deploying to Vercel** below for why — in short, a file-based
+database like SQLite cannot work on a serverless platform). Array fields
+(`missingInformation`, `flags`, `evidenceReferences`, `recommendations`,
+`toolCalls`) are stored as JSON text rather than Prisma's native `Json`
+type — a holdover from an earlier SQLite-based revision that still works
+correctly on Postgres, just without using `jsonb` — see `src/lib/json.ts`.
 
 ## File storage
 
 `src/lib/storage/FileStorageService.ts` defines the interface
-(`upload`/`retrieve`/`delete`); `LocalDiskStorage` is the dev
-implementation (files under `./storage/<applicationId>/<uuid>.<ext>`,
-outside any public directory). Swap in an S3/GCS/Supabase-Storage
-implementation for production by implementing the same interface —
-nothing else in the app depends on the backend. Documents are only ever
-served through the authenticated `GET /api/files/[id]` route, never as a
-static path.
+(`upload`/`retrieve`/`delete`); `LocalDiskStorage` — the only
+implementation currently wired up — writes files under
+`./storage/<applicationId>/<uuid>.<ext>`, outside any public directory.
+Documents are only ever served through the authenticated
+`GET /api/files/[id]` route, never as a static path.
+
+**This has the same problem as SQLite did (see below) and is not yet
+fixed:** on Vercel, disk writes under the deployment's working directory
+fail (read-only filesystem outside `/tmp`, and `/tmp` itself doesn't
+persist between invocations or across the multiple instances a
+deployment runs). File uploads will 500 there even after the database is
+fixed. Swap in a real object-storage implementation (Vercel Blob is the
+natural fit alongside a Vercel deployment; S3/GCS/Supabase Storage all
+work too) by implementing this same interface — nothing else in the app
+depends on the backend — before relying on uploads in a Vercel deployment.
 
 ## AI pipeline
 
@@ -167,26 +176,32 @@ implements).
 
 | Variable | Purpose |
 |---|---|
-| `DATABASE_URL` | Prisma connection string. Dev default: local SQLite (`file:./prisma/dev.db`). Production: a PostgreSQL URL. |
+| `DATABASE_URL` | Prisma connection string — a PostgreSQL URL, required (see **Deploying to Vercel**). |
 | `GEMINI_API_KEY` | Enables Gemini-backed analysis via Genkit. Unset → deterministic fallback analyzer. |
-| `STORAGE_DRIVER`, `STORAGE_LOCAL_DIR` | Local-disk file storage config. Replace `LocalDiskStorage` for S3/GCS/Supabase in production. |
+| `STORAGE_DRIVER`, `STORAGE_LOCAL_DIR` | Local-disk file storage config. `STORAGE_DRIVER` isn't wired to a second backend yet — see **File storage**'s Vercel caveat. |
 | `NEXT_PUBLIC_APP_NAME` | Display name. |
 
 ## Setup
 
+Requires a PostgreSQL database — a free instance from
+[Neon](https://neon.tech), [Supabase](https://supabase.com), or Vercel
+Postgres works, or run one locally:
+`docker run -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16`.
+
 ```bash
 npm install
-cp .env.example .env
-npx prisma migrate dev --name init   # creates prisma/dev.db and applies the schema
+cp .env.example .env                 # set DATABASE_URL to your Postgres instance
+npx prisma migrate dev --name init   # applies the schema (first run only)
 npm run db:seed                      # seeds Hermes' curated-knowledge table
 npm run dev                          # http://localhost:3000
 ```
 
-Production:
+Production build (also what `npm run build` does — it runs
+`prisma migrate deploy` before `next build` so migrations apply
+automatically):
 
 ```bash
 npm run build
-npm run db:migrate:deploy   # against your production DATABASE_URL
 npm run start
 ```
 
@@ -194,6 +209,37 @@ Set `GEMINI_API_KEY` in your environment (Google AI Studio →
 "Get API key") to enable Gemini-backed analysis; without it the app runs
 correctly on the deterministic fallback analyzer, clearly labeled as such
 throughout the UI.
+
+## Deploying to Vercel
+
+**The database must be PostgreSQL, not SQLite — this isn't optional.**
+Vercel's serverless functions run on a read-only filesystem outside
+`/tmp`, and `/tmp` itself is wiped between invocations and isn't shared
+across the multiple instances one deployment runs concurrently. A
+file-based database (a local SQLite file, as an earlier revision of this
+app used) therefore can't persist writes, and often can't even be *read*
+if the file wasn't part of the deployment bundle — the symptom is a `500`
+on the very first database call after deploying (e.g. the dashboard's
+`GET /api/applications`), even though everything works locally. This repo
+now targets Postgres everywhere (including local dev) specifically to
+avoid that split.
+
+Steps:
+
+1. Provision a Postgres database (Neon, Supabase, and Vercel Postgres all
+   have a free tier) and copy its connection string.
+2. In the Vercel project's Settings → Environment Variables, set
+   `DATABASE_URL` to that connection string for Production (and Preview,
+   if you use preview deployments) — and `GEMINI_API_KEY` if you want
+   Gemini-backed analysis instead of the fallback analyzer.
+3. Deploy. `npm run build` (Vercel's default build command for this repo)
+   runs `prisma migrate deploy` first, so the schema is created/updated
+   automatically on every deploy — no separate migration step needed.
+4. **Before relying on file uploads in that deployment**, read the
+   Vercel caveat under **File storage** above: uploads will fail there
+   until `LocalDiskStorage` is swapped for a real object-storage backend
+   (Vercel Blob, S3, or Supabase Storage). This is a known, currently
+   unimplemented gap, not something `DATABASE_URL` fixes.
 
 ## Testing performed
 
@@ -208,10 +254,12 @@ Automated tests (`src/lib/**/*.test.ts`) cover: CSV parsing edge cases,
 multi-file transaction aggregation (statistics not reset per file),
 suspicious-pattern detection (large-outlier, structuring), KYC document
 classification not dropping any uploaded file, fallback-analyzer
-correctness, and — as an integration test against a dedicated SQLite test
-database (`prisma/test.db`, see `src/test/setup.ts`) — the orchestrator's
-retry behavior: a simulated AML-stage failure leaves the KYC result
-intact and does not re-run it on retry, and a decided (`Approved`)
+correctness, and — as an integration test against a dedicated Postgres
+test database (see `src/test/setup.ts`; defaults to
+`postgresql://postgres:postgres@localhost:5432/verifin_test`, override
+with `TEST_DATABASE_URL`) — the orchestrator's retry behavior: a
+simulated AML-stage failure leaves the KYC result intact and does not
+re-run it on retry, and a decided (`Approved`)
 application rejects a further analyze call rather than reprocessing it.
 
 Manually exercised end-to-end against the running dev server (the
@@ -268,6 +316,14 @@ underlying evidence and reasoning (CLAUDE.md section 34).
 
 ## Known limitations
 
+- **File storage is not yet Vercel-safe.** `LocalDiskStorage` writes to
+  the local filesystem, which is read-only (outside a non-persistent
+  `/tmp`) on Vercel — uploads will fail there until it's swapped for
+  Vercel Blob/S3/Supabase Storage via the existing `FileStorageService`
+  interface. See **File storage** and **Deploying to Vercel** above. (The
+  database side of this exact problem — SQLite not working on Vercel —
+  is already fixed; this is the same class of bug in the other
+  filesystem-dependent piece of the app.)
 - No authentication/RBAC yet (see **Security model**) — acceptable for an
   investor-demo MVP, not for production.
 - The fallback KYC analyzer classifies documents by filename pattern, not
