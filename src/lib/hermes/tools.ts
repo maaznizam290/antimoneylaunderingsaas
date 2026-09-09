@@ -7,6 +7,7 @@ import { db } from '@/lib/db';
 import { getFileStorage } from '@/lib/storage/LocalDiskStorage';
 import { buildKycEvidenceSet, type KycEvidenceSet } from '@/lib/evidence/kycEvidence';
 import { buildTransactionEvidenceSet, type TransactionEvidenceSet } from '@/lib/evidence/transactionEvidence';
+import { isXlsxFile, xlsxBufferToCsvText } from '@/lib/evidence/xlsx';
 import { analyzeKycCompleteness } from '@/lib/ai/flows/determineKycCompleteness';
 import { analyzeAmlRisk } from '@/lib/ai/flows/flagAmlRisks';
 import { generateComplianceSummary as generateComplianceSummaryFlow } from '@/lib/ai/flows/summarizeComplianceResults';
@@ -45,10 +46,11 @@ export async function get_transaction_data(applicationId: string): Promise<Trans
   const files = await get_documents(applicationId, 'transaction_log');
   const storage = getFileStorage();
   const texts = await Promise.all(
-    files.map(async (f) => ({
-      name: f.name,
-      text: (await storage.retrieve(f.storageKey)).toString('utf-8'),
-    }))
+    files.map(async (f) => {
+      const buffer = await storage.retrieve(f.storageKey);
+      const text = isXlsxFile(f) ? await xlsxBufferToCsvText(buffer) : buffer.toString('utf-8');
+      return { name: f.name, text };
+    })
   );
   return buildTransactionEvidenceSet(texts);
 }

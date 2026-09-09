@@ -139,8 +139,8 @@ export default function NewApplicationPage() {
                 />
                 <FileDropZone
                   title="Transaction Logs"
-                  hint="One or more CSV exports of account activity"
-                  accept="text/csv,.csv"
+                  hint="One or more CSV or Excel (.xlsx) exports of account activity"
+                  accept="text/csv,.csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.xlsx"
                   pendingFiles={txFiles}
                   onFilesSelected={(files) => setTxFiles((prev) => [...prev, ...files])}
                   onRemove={(i) => setTxFiles((prev) => prev.filter((_, idx) => idx !== i))}

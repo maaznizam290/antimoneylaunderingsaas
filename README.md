@@ -109,10 +109,16 @@ to use the full evidence set (not a single representative file):
    name, so findings can cite which document(s) they're based on.
 2. **AML risk** (`flagAmlRisks.ts`) — Gemini receives the KYC documents
    plus a deterministic `TransactionEvidenceSet` built from *all*
-   transaction CSVs: aggregate statistics, already-flagged suspicious
-   patterns (large-outlier, structuring, high-velocity, round-number), and
-   a bounded representative sample — never a blind dump of every row, and
-   never just the first file (`src/lib/evidence/transactionEvidence.ts`).
+   transaction logs (`.csv` or `.xlsx` — an uploaded `.xlsx` workbook's
+   first worksheet is converted to CSV text at ingestion via
+   `src/lib/evidence/xlsx.ts`, using `exceljs` rather than the more common
+   `xlsx`/SheetJS package, which has unpatched-on-npm prototype-pollution
+   and ReDoS advisories and would be parsing untrusted uploads; everything
+   downstream is unaware of the original file format): aggregate
+   statistics, already-flagged suspicious patterns (large-outlier,
+   structuring, high-velocity, round-number), and a bounded representative
+   sample — never a blind dump of every row, and never just the first file
+   (`src/lib/evidence/transactionEvidence.ts`).
 3. **Compliance summary** (`summarizeComplianceResults.ts`) — synthesizes
    the two results above into an overall risk level and reviewer
    recommendations.
